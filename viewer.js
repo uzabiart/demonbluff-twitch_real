@@ -5,7 +5,7 @@
 
 window.addEventListener("DOMContentLoaded", () => {
 
-    const API_BASE = "https://demon-bluff-production.up.railway.app";
+    const API_BASE = "https://demonbluff-twitchreal-production.up.railway.app";
 
 // 🔥 FAKE TWITCH (LOCAL TEST MODE)
 if (!window.Twitch) {
