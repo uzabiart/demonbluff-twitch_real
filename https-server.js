@@ -93,8 +93,10 @@ function startRound(req, res, source) {
   const body = source === "query" ? req.query : req.body;
   const streamId = String(body.streamId || "").trim();
   const cardCount = Number(body.cardCount);
-  const requestedVoteLimit =
-    body.maxVotesPerUser ?? body.voteLimit ?? body.votesPerUser ?? body.allowedVotes;
+  let requestedVoteLimit = body.maxVotesPerUser;
+  if (requestedVoteLimit === undefined) requestedVoteLimit = body.voteLimit;
+  if (requestedVoteLimit === undefined) requestedVoteLimit = body.votesPerUser;
+  if (requestedVoteLimit === undefined) requestedVoteLimit = body.allowedVotes;
 
   if (!streamId) {
     return res.status(400).json({ ok: false, error: "Missing streamId" });
