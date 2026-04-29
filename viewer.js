@@ -8,15 +8,7 @@ window.addEventListener("DOMContentLoaded", () => {
     const API_BASE = "https://demonbluff-twitchreal-production.up.railway.app";
 
 // 🔥 FAKE TWITCH (LOCAL TEST MODE)
-const isLocalTest =
-  window.location &&
-  (
-    window.location.protocol === "file:" ||
-    window.location.hostname === "localhost" ||
-    window.location.hostname === "127.0.0.1"
-  );
-
-if (!window.Twitch && isLocalTest) {
+if (!window.Twitch) {
   console.log("FAKE TWITCH MODE");
 
   window.Twitch = {
@@ -49,8 +41,6 @@ if (!window.Twitch && isLocalTest) {
    let lastFitScale = null;
 
   let currentRoundId = null;
-  let currentMaxVotesPerUser = 1;
-  let selectedCardsThisRound = new Set();
   let pollingStarted = false;
   let streamId = null;
   let userId = null;
@@ -370,22 +360,14 @@ async function fetchGameState() {
   if (currentRoundId !== data.roundId) {
 
     currentRoundId = data.roundId;
-    selectedCardsThisRound = new Set();
 
     // liczba kart z backendu
     if (Number.isInteger(data.maxCards)) {
   ilosc_kart = Math.min(data.maxCards, 9);
 }
 
-    if (Number.isInteger(data.maxVotesPerUser)) {
-      currentMaxVotesPerUser = Math.max(1, Math.min(data.maxVotesPerUser, 4, ilosc_kart));
-    } else {
-      currentMaxVotesPerUser = 1;
-    }
-
     console.log("NEW ROUND", currentRoundId,
-                "cards:", ilosc_kart,
-                "votes per user:", currentMaxVotesPerUser);
+                "cards:", ilosc_kart);
 
     showCards();
   }
@@ -460,7 +442,6 @@ waitForTwitch();
 // start
 setDesign(design.w, design.h);
 applyUI("startup");
-showCards();
 
 
 
@@ -509,7 +490,6 @@ function logMetrics(tag, extra) {
 function addCard(label, x, y, cardId) {
   const el = document.createElement("div");
   el.className = "card";
-  el.dataset.cardId = String(cardId);
   el.textContent = label;
   el.style.left = x + "px";
   el.style.top  = y + "px";
@@ -574,13 +554,6 @@ if (window.Twitch && window.Twitch.ext && window.Twitch.ext.onAuthorized) {
   el.textContent = msg;
 }
 
-function markCardSelected(cardId) {
-  const el = stage.querySelector(`.card[data-card-id="${cardId}"]`);
-  if (!el) return;
-  el.style.background = "rgba(255, 255, 0, 0.35)";
-  el.style.boxShadow = "0 0 18px rgba(255, 255, 0, 0.7)";
-}
-
 function getUserId() {
   if (userId) return userId;
 
@@ -595,16 +568,6 @@ function getUserId() {
 async function sendVote(cardId) {
   if (!streamId) {
     setStatus("No streamId.");
-    return;
-  }
-
-  if (selectedCardsThisRound.has(cardId)) {
-    setStatus("Already selected this card.");
-    return;
-  }
-
-  if (selectedCardsThisRound.size >= currentMaxVotesPerUser) {
-    setStatus(`Vote limit reached (${currentMaxVotesPerUser}).`);
     return;
   }
 
@@ -628,43 +591,11 @@ async function sendVote(cardId) {
   }
 
   if (res.ok) {
-    let data = null;
-    try {
-      data = await res.json();
-    } catch {}
-
-    selectedCardsThisRound.add(cardId);
-    markCardSelected(cardId);
-
-    const votesUsed = data && Number.isInteger(data.votesUsed) ? data.votesUsed : selectedCardsThisRound.size;
-    const maxVotes = data && Number.isInteger(data.maxVotesPerUser) ? data.maxVotesPerUser : currentMaxVotesPerUser;
-    const votesRemaining = Math.max(0, maxVotes - votesUsed);
-
-    if (votesRemaining > 0) {
-      setStatus(`Voted ${votesUsed}/${maxVotes}.`);
-    } else {
-      setStatus(`Voted ${votesUsed}/${maxVotes}.`);
-    }
+    setStatus("Voted!");
     return;
   }
 
   if (res.status === 409) {
-    let data = null;
-    try {
-      data = await res.json();
-    } catch {}
-
-    if (data && data.error === "ALREADY_VOTED_CARD") {
-      setStatus("Already selected this card.");
-      return;
-    }
-
-    if (data && data.error === "VOTE_LIMIT_REACHED") {
-      const maxVotes = Number.isInteger(data.maxVotesPerUser) ? data.maxVotesPerUser : currentMaxVotesPerUser;
-      setStatus(`Vote limit reached (${maxVotes}).`);
-      return;
-    }
-
     setStatus("You already voted this round.");
     return;
   }
