@@ -1,5 +1,5 @@
 
-//   xd
+
 
 
 const express = require("express");
@@ -55,8 +55,9 @@ streams = {
   "streamer1": {
       roundId: 3,
       maxCards: 7,
+      maxVotesPerUser: 1,
       votes: [0,0,0,0,0,0,0],
-      userLastVotedRound: {}
+      userVotesThisRound: {}
   }
 }
 */
@@ -67,21 +68,33 @@ function getStream(streamId) {
     streams[streamId] = {
       roundId: 1,
       maxCards: 10,
+      maxVotesPerUser: 1,
       votes: Array(10).fill(0),
-      userLastVotedRound: Object.create(null),
+      userVotesThisRound: Object.create(null),
     };
   }
   return streams[streamId];
 }
 
+function parseVoteLimit(raw, cardCount) {
+  if (raw === undefined || raw === null || raw === "") return 1;
 
+  const limit = Number(raw);
+  const maxAllowed = Math.min(4, cardCount);
 
+  if (!Number.isInteger(limit) || limit < 1 || limit > maxAllowed) {
+    return null;
+  }
 
-// ====== Round control ======
+  return limit;
+}
 
-app.post("/startRound", (req, res) => {
-  const streamId = String(req.body.streamId || "").trim();
-  const cardCount = Number(req.body.cardCount);
+function startRound(req, res, source) {
+  const body = source === "query" ? req.query : req.body;
+  const streamId = String(body.streamId || "").trim();
+  const cardCount = Number(body.cardCount);
+  const requestedVoteLimit =
+    body.maxVotesPerUser ?? body.voteLimit ?? body.votesPerUser ?? body.allowedVotes;
 
   if (!streamId) {
     return res.status(400).json({ ok: false, error: "Missing streamId" });
@@ -91,19 +104,40 @@ app.post("/startRound", (req, res) => {
     return res.status(400).json({ ok: false, error: "Invalid cardCount (1-10)" });
   }
 
+  const maxVotesPerUser = parseVoteLimit(requestedVoteLimit, cardCount);
+  if (maxVotesPerUser === null) {
+    return res.status(400).json({
+      ok: false,
+      error: `Invalid maxVotesPerUser (1-${Math.min(4, cardCount)})`
+    });
+  }
+
   const stream = getStream(streamId);
 
   stream.roundId++;
   stream.maxCards = cardCount;
+  stream.maxVotesPerUser = maxVotesPerUser;
   stream.votes = Array(cardCount).fill(0);
-  stream.userLastVotedRound = Object.create(null);
+  stream.userVotesThisRound = Object.create(null);
+
+  console.log("ROUND STARTED FOR:", streamId, "cards=", cardCount, "votesPerUser=", maxVotesPerUser);
 
   res.json({
     ok: true,
     streamId,
     roundId: stream.roundId,
-    maxCards: stream.maxCards
+    maxCards: stream.maxCards,
+    maxVotesPerUser: stream.maxVotesPerUser
   });
+}
+
+
+
+
+// ====== Round control ======
+
+app.post("/startRound", (req, res) => {
+  startRound(req, res, "body");
 });
 
 
@@ -134,18 +168,47 @@ app.post("/vote", (req, res) => {
     });
   }
 
-  if (stream.userLastVotedRound[userId] === stream.roundId) {
-    return res.status(409).json({ ok: false, error: "ALREADY_VOTED" });
+  if (!stream.userVotesThisRound) {
+    stream.userVotesThisRound = Object.create(null);
+  }
+
+  let userVotes = stream.userVotesThisRound[userId];
+  if (!userVotes || userVotes.roundId !== stream.roundId) {
+    userVotes = { roundId: stream.roundId, cards: [] };
+    stream.userVotesThisRound[userId] = userVotes;
+  }
+
+  if (userVotes.cards.includes(cardId)) {
+    return res.status(409).json({
+      ok: false,
+      error: "ALREADY_VOTED_CARD",
+      maxVotesPerUser: stream.maxVotesPerUser,
+      votesUsed: userVotes.cards.length,
+      votesRemaining: Math.max(0, stream.maxVotesPerUser - userVotes.cards.length)
+    });
+  }
+
+  if (userVotes.cards.length >= stream.maxVotesPerUser) {
+    return res.status(409).json({
+      ok: false,
+      error: "VOTE_LIMIT_REACHED",
+      maxVotesPerUser: stream.maxVotesPerUser,
+      votesUsed: userVotes.cards.length,
+      votesRemaining: 0
+    });
   }
 
   stream.votes[cardId - 1]++;
-  stream.userLastVotedRound[userId] = stream.roundId;
+  userVotes.cards.push(cardId);
 
   res.json({
     ok: true,
     streamId,
     roundId: stream.roundId,
-    cardId
+    cardId,
+    maxVotesPerUser: stream.maxVotesPerUser,
+    votesUsed: userVotes.cards.length,
+    votesRemaining: Math.max(0, stream.maxVotesPerUser - userVotes.cards.length)
   });
 });
 
@@ -170,6 +233,7 @@ app.get("/results", (req, res) => {
     ok:true,
     roundId: stream.roundId,
     maxCards: stream.maxCards,
+    maxVotesPerUser: stream.maxVotesPerUser || 1,
     votes: votesObj
   });
 });
@@ -182,32 +246,7 @@ app.get("/__whoami", (req, res) => {
 
 
 app.get("/startRound", (req, res) => {
-  const streamId = String(req.query.streamId || "").trim();
-  const cardCount = Number(req.query.cardCount);
-
-  if (!streamId) {
-    return res.status(400).json({ ok: false, error: "Missing streamId" });
-  }
-
-  if (!Number.isInteger(cardCount) || cardCount < 1 || cardCount > 10) {
-    return res.status(400).json({ ok: false, error: "Invalid cardCount (1-10)" });
-  }
-
-  const stream = getStream(streamId);
-
-  stream.roundId++;
-  stream.maxCards = cardCount;
-  stream.votes = Array(cardCount).fill(0);
-  stream.userLastVotedRound = Object.create(null);
-
-  console.log("ROUND STARTED FOR:", streamId);
-
-  res.json({
-    ok: true,
-    streamId,
-    roundId: stream.roundId,
-    maxCards: stream.maxCards
-  });
+  startRound(req, res, "query");
 });
 
 
