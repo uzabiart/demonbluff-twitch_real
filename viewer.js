@@ -8,7 +8,15 @@ window.addEventListener("DOMContentLoaded", () => {
     const API_BASE = "https://demonbluff-twitchreal-production.up.railway.app";
 
 // 🔥 FAKE TWITCH (LOCAL TEST MODE)
-if (!window.Twitch) {
+const isLocalTest =
+  window.location &&
+  (
+    window.location.protocol === "file:" ||
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1"
+  );
+
+if (!window.Twitch && isLocalTest) {
   console.log("FAKE TWITCH MODE");
 
   window.Twitch = {
@@ -452,6 +460,7 @@ waitForTwitch();
 // start
 setDesign(design.w, design.h);
 applyUI("startup");
+showCards();
 
 
 
@@ -568,7 +577,8 @@ if (window.Twitch && window.Twitch.ext && window.Twitch.ext.onAuthorized) {
 function markCardSelected(cardId) {
   const el = stage.querySelector(`.card[data-card-id="${cardId}"]`);
   if (!el) return;
-  el.classList.add("selected");
+  el.style.background = "rgba(255, 255, 0, 0.35)";
+  el.style.boxShadow = "0 0 18px rgba(255, 255, 0, 0.7)";
 }
 
 function getUserId() {
@@ -626,8 +636,8 @@ async function sendVote(cardId) {
     selectedCardsThisRound.add(cardId);
     markCardSelected(cardId);
 
-    const votesUsed = Number.isInteger(data?.votesUsed) ? data.votesUsed : selectedCardsThisRound.size;
-    const maxVotes = Number.isInteger(data?.maxVotesPerUser) ? data.maxVotesPerUser : currentMaxVotesPerUser;
+    const votesUsed = data && Number.isInteger(data.votesUsed) ? data.votesUsed : selectedCardsThisRound.size;
+    const maxVotes = data && Number.isInteger(data.maxVotesPerUser) ? data.maxVotesPerUser : currentMaxVotesPerUser;
     const votesRemaining = Math.max(0, maxVotes - votesUsed);
 
     if (votesRemaining > 0) {
@@ -644,12 +654,12 @@ async function sendVote(cardId) {
       data = await res.json();
     } catch {}
 
-    if (data?.error === "ALREADY_VOTED_CARD") {
+    if (data && data.error === "ALREADY_VOTED_CARD") {
       setStatus("Already selected this card.");
       return;
     }
 
-    if (data?.error === "VOTE_LIMIT_REACHED") {
+    if (data && data.error === "VOTE_LIMIT_REACHED") {
       const maxVotes = Number.isInteger(data.maxVotesPerUser) ? data.maxVotesPerUser : currentMaxVotesPerUser;
       setStatus(`Vote limit reached (${maxVotes}).`);
       return;
