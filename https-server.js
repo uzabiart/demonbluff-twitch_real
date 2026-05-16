@@ -15,6 +15,12 @@ const ALLOWED_ORIGINS = new Set([
   "https://twitch.tv",
 ]);
 
+function isAllowedOrigin(origin) {
+  if (!origin) return false;
+  if (ALLOWED_ORIGINS.has(origin)) return true;
+  return /^https:\/\/[a-z0-9-]+\.ext-twitch\.tv$/i.test(origin);
+}
+
 app.use((req, res, next) => {
   console.log(new Date().toISOString(), req.method, req.url, "origin=", req.headers.origin || "-");
   next();
@@ -23,13 +29,12 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
-  // CORS (dla requestów robionych przez supervisor.js)
-  if (origin && ALLOWED_ORIGINS.has(origin)) {
+  // CORS dla Twitch Extension iframe i lokalnych testow.
+  if (isAllowedOrigin(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Credentials", "true");
   } else {
-    // fallback (np. gdy testujesz ręcznie)
+    // Fallback np. dla recznego sprawdzania JSON-a w przegladarce.
     res.setHeader("Access-Control-Allow-Origin", "*");
   }
 
@@ -55,9 +60,10 @@ streams = {
   "streamer1": {
       roundId: 3,
       maxCards: 7,
-      maxVotesPerUser: 1,
+      maxVotesPerUser: 2,
       votes: [0,0,0,0,0,0,0],
-      userVotesThisRound: {}
+      deadCards: [],
+      userVotesByRound: {}
   }
 }
 */
@@ -70,33 +76,55 @@ function getStream(streamId) {
       maxCards: 10,
       maxVotesPerUser: 1,
       votes: Array(10).fill(0),
-      userVotesThisRound: Object.create(null),
+      deadCards: [],
+      userVotesByRound: Object.create(null),
+      players: Object.create(null),
+      leaderboard: Object.create(null),
+      scoredRounds: Object.create(null),
     };
   }
   return streams[streamId];
 }
 
-function parseVoteLimit(raw, cardCount) {
-  if (raw === undefined || raw === null || raw === "") return 1;
-
-  const limit = Number(raw);
-  const maxAllowed = Math.min(4, cardCount);
-
-  if (!Number.isInteger(limit) || limit < 1 || limit > maxAllowed) {
-    return null;
-  }
-
-  return limit;
+function clampInt(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isInteger(n)) return fallback;
+  return Math.max(min, Math.min(n, max));
 }
 
-function startRound(req, res, source) {
-  const body = source === "query" ? req.query : req.body;
-  const streamId = String(body.streamId || "").trim();
-  const cardCount = Number(body.cardCount);
-  let requestedVoteLimit = body.maxVotesPerUser;
-  if (requestedVoteLimit === undefined) requestedVoteLimit = body.voteLimit;
-  if (requestedVoteLimit === undefined) requestedVoteLimit = body.votesPerUser;
-  if (requestedVoteLimit === undefined) requestedVoteLimit = body.allowedVotes;
+function cleanDisplayName(value, fallback) {
+  const name = String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 24);
+
+  return name || fallback;
+}
+
+function buildLeaderboard(stream) {
+  return Object.entries(stream.leaderboard)
+    .map(([userId, row]) => ({
+      userId,
+      displayName: stream.players[userId] || row.displayName || userId,
+      score: row.score || 0,
+      correctAnswers: row.correctAnswers || 0
+    }))
+    .sort((a, b) => b.score - a.score || a.displayName.localeCompare(b.displayName))
+    .map((row, index) => ({
+      rank: index + 1,
+      ...row
+    }));
+}
+
+
+
+
+// ====== Round control ======
+
+app.post("/startRound", (req, res) => {
+  const streamId = String(req.body.streamId || "").trim();
+  const cardCount = Number(req.body.cardCount);
+  const maxVotesPerUser = clampInt(req.body.maxVotesPerUser, 1, 1, 4);
 
   if (!streamId) {
     return res.status(400).json({ ok: false, error: "Missing streamId" });
@@ -106,40 +134,23 @@ function startRound(req, res, source) {
     return res.status(400).json({ ok: false, error: "Invalid cardCount (1-10)" });
   }
 
-  const maxVotesPerUser = parseVoteLimit(requestedVoteLimit, cardCount);
-  if (maxVotesPerUser === null) {
-    return res.status(400).json({
-      ok: false,
-      error: `Invalid maxVotesPerUser (1-${Math.min(4, cardCount)})`
-    });
-  }
-
   const stream = getStream(streamId);
 
   stream.roundId++;
   stream.maxCards = cardCount;
   stream.maxVotesPerUser = maxVotesPerUser;
   stream.votes = Array(cardCount).fill(0);
-  stream.userVotesThisRound = Object.create(null);
-
-  console.log("ROUND STARTED FOR:", streamId, "cards=", cardCount, "votesPerUser=", maxVotesPerUser);
+  stream.deadCards = [];
+  stream.userVotesByRound = Object.create(null);
 
   res.json({
     ok: true,
     streamId,
     roundId: stream.roundId,
     maxCards: stream.maxCards,
-    maxVotesPerUser: stream.maxVotesPerUser
+    maxVotesPerUser: stream.maxVotesPerUser,
+    deadCards: stream.deadCards
   });
-}
-
-
-
-
-// ====== Round control ======
-
-app.post("/startRound", (req, res) => {
-  startRound(req, res, "body");
 });
 
 
@@ -148,6 +159,7 @@ app.post("/vote", (req, res) => {
   const streamId = String(req.body.streamId || "").trim();
   const cardId = Number(req.body.cardId);
   const userId = String(req.body.userId || "").trim();
+  const displayName = cleanDisplayName(req.body.displayName, userId);
 
   if (!streamId) {
     return res.status(400).json({ ok: false, error: "Missing streamId" });
@@ -155,6 +167,188 @@ app.post("/vote", (req, res) => {
 
   if (!userId) {
     return res.status(400).json({ ok: false, error: "Missing userId" });
+  }
+
+  const stream = getStream(streamId);
+  stream.players[userId] = displayName;
+
+  if (
+    !Number.isInteger(cardId) ||
+    cardId < 1 ||
+    cardId > stream.maxCards
+  ) {
+    return res.status(400).json({
+      ok: false,
+      error: `Invalid cardId (1-${stream.maxCards})`
+    });
+  }
+
+  if (stream.deadCards.includes(cardId)) {
+    return res.status(409).json({
+      ok: false,
+      error: "CARD_DEAD",
+      cardId,
+      deadCards: stream.deadCards
+    });
+  }
+
+  const roundKey = String(stream.roundId);
+  if (!stream.userVotesByRound[roundKey]) {
+    stream.userVotesByRound[roundKey] = Object.create(null);
+  }
+
+  const userVotes = stream.userVotesByRound[roundKey][userId] || [];
+
+  if (userVotes.includes(cardId)) {
+    return res.status(409).json({ ok: false, error: "ALREADY_VOTED_CARD" });
+  }
+
+  if (userVotes.length >= stream.maxVotesPerUser) {
+    return res.status(409).json({
+      ok: false,
+      error: "VOTE_LIMIT_REACHED",
+      maxVotesPerUser: stream.maxVotesPerUser
+    });
+  }
+
+  stream.votes[cardId - 1]++;
+  stream.userVotesByRound[roundKey][userId] = userVotes.concat(cardId);
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    cardId,
+    displayName,
+    votesUsed: userVotes.length + 1,
+    maxVotesPerUser: stream.maxVotesPerUser
+  });
+});
+
+app.post("/scoreRound", (req, res) => {
+  const streamId = String(req.body.streamId || "").trim();
+  const correctCardId = Number(req.body.correctCardId);
+  const points = clampInt(req.body.points, 1, 1, 1000);
+  const force = req.body.force === true;
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  const stream = getStream(streamId);
+
+  if (
+    !Number.isInteger(correctCardId) ||
+    correctCardId < 1 ||
+    correctCardId > stream.maxCards
+  ) {
+    return res.status(400).json({
+      ok: false,
+      error: `Invalid correctCardId (1-${stream.maxCards})`
+    });
+  }
+
+  const roundKey = String(stream.roundId);
+  if (stream.scoredRounds[roundKey] && !force) {
+    return res.status(409).json({
+      ok: false,
+      error: "ROUND_ALREADY_SCORED",
+      roundId: stream.roundId,
+      leaderboard: buildLeaderboard(stream)
+    });
+  }
+
+  const roundVotes = stream.userVotesByRound[roundKey] || Object.create(null);
+  const winners = [];
+
+  for (const [userId, votedCards] of Object.entries(roundVotes)) {
+    if (!Array.isArray(votedCards) || !votedCards.includes(correctCardId)) continue;
+
+    if (!stream.leaderboard[userId]) {
+      stream.leaderboard[userId] = {
+        displayName: stream.players[userId] || userId,
+        score: 0,
+        correctAnswers: 0
+      };
+    }
+
+    stream.leaderboard[userId].displayName = stream.players[userId] || stream.leaderboard[userId].displayName || userId;
+    stream.leaderboard[userId].score += points;
+    stream.leaderboard[userId].correctAnswers++;
+
+    winners.push({
+      userId,
+      displayName: stream.players[userId] || userId
+    });
+  }
+
+  stream.scoredRounds[roundKey] = {
+    correctCardId,
+    points,
+    scoredAt: new Date().toISOString(),
+    winners: winners.length
+  };
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    correctCardId,
+    points,
+    winners,
+    leaderboard: buildLeaderboard(stream)
+  });
+});
+
+app.get("/leaderboard", (req, res) => {
+  const streamId = String(req.query.streamId || "").trim();
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  const stream = getStream(streamId);
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    leaderboard: buildLeaderboard(stream)
+  });
+});
+
+app.post("/resetLeaderboard", (req, res) => {
+  const streamId = String(req.body.streamId || "").trim();
+  const clearCurrentRoundVotes = req.body.clearCurrentRoundVotes !== false;
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  const stream = getStream(streamId);
+  stream.leaderboard = Object.create(null);
+  stream.scoredRounds = Object.create(null);
+
+  if (clearCurrentRoundVotes) {
+    stream.votes = Array(stream.maxCards).fill(0);
+    stream.userVotesByRound[String(stream.roundId)] = Object.create(null);
+  }
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    clearedCurrentRoundVotes: clearCurrentRoundVotes,
+    leaderboard: []
+  });
+});
+
+app.post("/deadCard", (req, res) => {
+  const streamId = String(req.body.streamId || "").trim();
+  const cardId = Number(req.body.cardId);
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
   }
 
   const stream = getStream(streamId);
@@ -170,47 +364,17 @@ app.post("/vote", (req, res) => {
     });
   }
 
-  if (!stream.userVotesThisRound) {
-    stream.userVotesThisRound = Object.create(null);
+  if (!stream.deadCards.includes(cardId)) {
+    stream.deadCards.push(cardId);
+    stream.deadCards.sort((a, b) => a - b);
   }
-
-  let userVotes = stream.userVotesThisRound[userId];
-  if (!userVotes || userVotes.roundId !== stream.roundId) {
-    userVotes = { roundId: stream.roundId, cards: [] };
-    stream.userVotesThisRound[userId] = userVotes;
-  }
-
-  if (userVotes.cards.includes(cardId)) {
-    return res.status(409).json({
-      ok: false,
-      error: "ALREADY_VOTED_CARD",
-      maxVotesPerUser: stream.maxVotesPerUser,
-      votesUsed: userVotes.cards.length,
-      votesRemaining: Math.max(0, stream.maxVotesPerUser - userVotes.cards.length)
-    });
-  }
-
-  if (userVotes.cards.length >= stream.maxVotesPerUser) {
-    return res.status(409).json({
-      ok: false,
-      error: "VOTE_LIMIT_REACHED",
-      maxVotesPerUser: stream.maxVotesPerUser,
-      votesUsed: userVotes.cards.length,
-      votesRemaining: 0
-    });
-  }
-
-  stream.votes[cardId - 1]++;
-  userVotes.cards.push(cardId);
 
   res.json({
     ok: true,
     streamId,
     roundId: stream.roundId,
     cardId,
-    maxVotesPerUser: stream.maxVotesPerUser,
-    votesUsed: userVotes.cards.length,
-    votesRemaining: Math.max(0, stream.maxVotesPerUser - userVotes.cards.length)
+    deadCards: stream.deadCards
   });
 });
 
@@ -235,7 +399,8 @@ app.get("/results", (req, res) => {
     ok:true,
     roundId: stream.roundId,
     maxCards: stream.maxCards,
-    maxVotesPerUser: stream.maxVotesPerUser || 1,
+    maxVotesPerUser: stream.maxVotesPerUser,
+    deadCards: stream.deadCards,
     votes: votesObj
   });
 });
@@ -248,7 +413,37 @@ app.get("/__whoami", (req, res) => {
 
 
 app.get("/startRound", (req, res) => {
-  startRound(req, res, "query");
+  const streamId = String(req.query.streamId || "").trim();
+  const cardCount = Number(req.query.cardCount);
+  const maxVotesPerUser = clampInt(req.query.maxVotesPerUser, 1, 1, 4);
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  if (!Number.isInteger(cardCount) || cardCount < 1 || cardCount > 10) {
+    return res.status(400).json({ ok: false, error: "Invalid cardCount (1-10)" });
+  }
+
+  const stream = getStream(streamId);
+
+  stream.roundId++;
+  stream.maxCards = cardCount;
+  stream.maxVotesPerUser = maxVotesPerUser;
+  stream.votes = Array(cardCount).fill(0);
+  stream.deadCards = [];
+  stream.userVotesByRound = Object.create(null);
+
+  console.log("ROUND STARTED FOR:", streamId);
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    maxCards: stream.maxCards,
+    maxVotesPerUser: stream.maxVotesPerUser,
+    deadCards: stream.deadCards
+  });
 });
 
 
