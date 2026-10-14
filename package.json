@@ -1,16 +1,16 @@
 {
-  "name": "extension",
+  "name": "demon-bluff-viewer-server",
   "version": "1.0.0",
-  "description": "",
+  "private": true,
+  "description": "Isolated Twitch viewer and Unity bridge for the Demon Bluff thesis",
   "main": "https-server.js",
   "scripts": {
-    "start": "node https-server.js"
+    "start": "node --env-file-if-exists=.env https-server.js",
+    "test": "node --test"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "engines": { "node": ">=22.9.0" },
   "dependencies": {
-    "express": "^5.2.1"
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2"
   }
 }
