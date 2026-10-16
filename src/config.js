@@ -1,6 +1,5 @@
 const { isIP } = require('node:net');
 const path = require('node:path');
-const { existsSync } = require('node:fs');
 
 function isLoopback(address) {
   return address === '::1' || address === '127.0.0.1' || address === '::ffff:127.0.0.1';
@@ -23,12 +22,16 @@ function createConfig(options = {}) {
   const localDevelopment = development && env.NODE_ENV !== 'production'
     && (options.allowLocalTest ?? (env.ALLOW_LOCAL_TEST === 'true')) && isLoopback(host);
   const list = options.allowedChannelIds ?? (env.UNITY_CHANNEL_IDS || '').split(',');
-  const allowedChannelIds = new Set(list.map(String).map(x => x.trim()).filter(Boolean));
+  const allowedChannelIds = new Set();
+  for (const value of list) {
+    const id = String(value).trim();
+    if (id !== '') allowedChannelIds.add(id);
+  }
   const localChannelId = options.localChannelId ?? env.LOCAL_CHANNEL_ID ?? 'local_channel';
   if (!allowedChannelIds.size && localDevelopment) allowedChannelIds.add(localChannelId);
   if (!allowedChannelIds.size) throw new Error('UNITY_CHANNEL_IDS must contain an explicit channel allowlist');
-  if ([...allowedChannelIds].some(x => !/^[A-Za-z0-9_-]{1,64}$/.test(x))) {
-    throw new Error('Invalid channel allowlist');
+  for (const id of allowedChannelIds) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error('Invalid channel allowlist');
   }
   const unityKey = options.unityKey ?? env.UNITY_API_KEY ?? (localDevelopment ? 'local-development-only' : '');
   if (!localDevelopment && unityKey === 'local-development-only') {
@@ -53,8 +56,7 @@ function createConfig(options = {}) {
     maxBlocked: number(options.maxBlocked ?? env.MAX_BLOCKED_PER_CHANNEL, 1000, 1, 10000),
     requireApproval: options.requireApproval ?? (env.REQUIRE_MESSAGE_APPROVAL
       ? env.REQUIRE_MESSAGE_APPROVAL !== 'false' : !localDevelopment),
-    viewerDir: path.resolve(options.viewerDir ?? (env.VIEWER_DIR || undefined)
-      ?? (existsSync(defaultViewer) ? defaultViewer : path.resolve(__dirname, '../../viewer'))),
+    viewerDir: path.resolve(options.viewerDir ?? env.VIEWER_DIR ?? defaultViewer),
   };
 }
 
